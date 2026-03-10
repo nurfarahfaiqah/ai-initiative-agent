@@ -455,23 +455,38 @@ def detect_possible_join_keys(datasets_dict: Dict[str, pd.DataFrame]):
 def build_machine_findings(datasets: Dict[str, pd.DataFrame]):
     con = duckdb.connect()
     findings = {}
-    for name, df in datasets.items():
-        safe_name = standardize_column_name(name)
-        con.register(safe_name, df)
+
+    for idx, (name, df) in enumerate(datasets.items()):
+        # Use a safe relation name for DuckDB registration.
+        safe_base = standardize_column_name(name) or "dataset"
+        relation_name = f"ds_{idx}_{safe_base}"
+        con.register(relation_name, df)
+
         item = {}
-        item["row_count"] = con.execute(f"SELECT COUNT(*) AS cnt FROM {safe_name}").df().to_dict(orient="records")
+        try:
+            item["row_count"] = con.execute(
+                f'SELECT COUNT(*) AS cnt FROM "{relation_name}"'
+            ).df().to_dict(orient="records")
+        except Exception as e:
+            item["row_count_error"] = str(e)
+
         text_cols = df.select_dtypes(include=["object"]).columns.tolist()
         if text_cols:
             top_col = text_cols[0]
-            q = f'''
-            SELECT "{top_col}" AS category, COUNT(*) AS total
-            FROM {safe_name}
-            GROUP BY 1
-            ORDER BY total DESC
-            LIMIT 10
-            '''
-            item["top_category_table"] = con.execute(q).df().to_dict(orient="records")
+            try:
+                q = f'''
+                SELECT "{top_col}" AS category, COUNT(*) AS total
+                FROM "{relation_name}"
+                GROUP BY 1
+                ORDER BY total DESC
+                LIMIT 10
+                '''
+                item["top_category_table"] = con.execute(q).df().to_dict(orient="records")
+            except Exception as e:
+                item["top_category_table_error"] = str(e)
+
         findings[name] = item
+
     return findings
 
 
