@@ -882,7 +882,7 @@ with tab1:
                         join_key_report,
                     )
 
-                                        st.session_state.cleaned_datasets = cleaned_datasets
+                    st.session_state.cleaned_datasets = cleaned_datasets
                     st.session_state.cleaning_reports = cleaning_reports
                     st.session_state.dataset_profiles = dataset_profiles
                     st.session_state.dataset_category_insights = dataset_category_insights
