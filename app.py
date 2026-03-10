@@ -894,8 +894,7 @@ with tab1:
                     st.session_state.analysis_output = ""
                     st.session_state.executive_json = None
                     st.session_state.ppt_bytes = None
-
-                                        if auto_call_brain and groq_api_key:
+                    if auto_call_brain and groq_api_key:
                         with st.spinner("Calling the brain for executive insights..."):
                             parsed_json, raw_text = call_groq_json(groq_api_key, model_name, prompt)
 
