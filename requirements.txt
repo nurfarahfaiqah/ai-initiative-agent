@@ -4,3 +4,5 @@ duckdb
 openpyxl
 numpy
 python-dateutil
+python-pptx
+google-genai
