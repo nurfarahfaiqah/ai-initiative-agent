@@ -947,34 +947,3 @@ with tab3:
 
         st.subheader("Raw Executive JSON")
         st.json(st.session_state.executive_json)
-
-with tab4:
-    presenter_text = """
-### Presenter flow
-1. Open the Streamlit link.
-2. Upload the datasets.
-3. Click **Run Analysis**.
-4. Open **Executive Insights**.
-5. Open **Slides** and click **Download PowerPoint**.
-
-### Demo backend mode
-- The app calls an **n8n webhook**.
-- n8n returns a **predefined JSON response**.
-- This makes the demo stable and avoids live model/API quota issues.
-
-### Template file
-- File name: `template_exec_deck.pptx`
-- Place it in the same folder as `app.py`.
-- The app uses the first 7 slides of the template.
-- Each slide should have a title placeholder and either a body placeholder or a text box area for content.
-
-### Recommended requirements.txt
-```txt
-streamlit
-pandas
-duckdb
-openpyxl
-numpy
-python-dateutil
-python-pptx
-requests
