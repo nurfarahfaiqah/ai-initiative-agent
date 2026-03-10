@@ -907,12 +907,12 @@ with tab1:
                             st.session_state.ppt_bytes = create_pptx(parsed_json)
                         else:
                             st.session_state.analysis_output = raw_text
-                                st.session_state.ppt_bytes = create_pptx(parsed_json)
-                            else:
-                                st.session_state.analysis_output = raw_text
-                                st.session_state.ppt_bytes = create_pptx(parsed_json)
-                            else:
-                                st.session_state.analysis_output = raw_text
+                            st.session_state.ppt_bytes = create_pptx(parsed_json)
+                        else:
+                            st.session_state.analysis_output = raw_text
+                            st.session_state.ppt_bytes = create_pptx(parsed_json)
+                        else:
+                            st.session_state.analysis_output = raw_text
 
                     st.success("Analysis completed.")
 
