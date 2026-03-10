@@ -882,7 +882,7 @@ with tab1:
                         join_key_report,
                     )
 
-                    st.session_state.cleaned_datasets = cleaned_datasets
+                                        st.session_state.cleaned_datasets = cleaned_datasets
                     st.session_state.cleaning_reports = cleaning_reports
                     st.session_state.dataset_profiles = dataset_profiles
                     st.session_state.dataset_category_insights = dataset_category_insights
@@ -894,15 +894,14 @@ with tab1:
                     st.session_state.analysis_output = ""
                     st.session_state.executive_json = None
                     st.session_state.ppt_bytes = None
+
+                    # Automatically call the AI brain
                     if auto_call_brain and groq_api_key:
                         with st.spinner("Calling the brain for executive insights..."):
                             parsed_json, raw_text = call_groq_json(groq_api_key, model_name, prompt)
 
                         if parsed_json is not None:
                             st.session_state.executive_json = parsed_json
-                            st.session_state.analysis_output = raw_text
-                            st.session_state.ppt_bytes = create_pptx(parsed_json)
-                        else:
                             st.session_state.analysis_output = raw_text
                             st.session_state.ppt_bytes = create_pptx(parsed_json)
                         else:
