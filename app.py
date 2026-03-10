@@ -8,12 +8,11 @@ from typing import Dict, Tuple, Any
 import duckdb
 import numpy as np
 import pandas as pd
-import streamlit as st
 import requests
+import streamlit as st
 from dateutil import parser
 from pptx import Presentation
 from pptx.util import Inches, Pt
-
 
 
 # -----------------------------
@@ -27,7 +26,7 @@ st.set_page_config(
 
 st.title("📊 AI Initiative Discovery Agent")
 st.caption(
-    "Upload datasets → clean & normalize → analyze → generate executive insights → create PowerPoint slides"
+    "Upload datasets → clean & normalize → analyze → call n8n backend → generate executive insights → create PowerPoint slides"
 )
 
 
@@ -109,8 +108,6 @@ DEFAULT_BUSINESS_GOAL = (
     "Identify customer pain points, derive initiative opportunities, recommend KPI/KRIs, "
     "and reduce analyst time spent on manual data cleaning, analysis, and brainstorming."
 )
-
-DEFAULT_MODEL = "openai/gpt-oss-120b"
 
 
 # -----------------------------
@@ -453,7 +450,6 @@ def build_machine_findings(datasets: Dict[str, pd.DataFrame]):
     findings = {}
 
     for idx, (name, df) in enumerate(datasets.items()):
-        # Use a safe relation name for DuckDB registration.
         safe_base = standardize_column_name(name) or "dataset"
         relation_name = f"ds_{idx}_{safe_base}"
         con.register(relation_name, df)
@@ -486,7 +482,7 @@ def build_machine_findings(datasets: Dict[str, pd.DataFrame]):
     return findings
 
 
-def build_analysis_prompt(
+def build_analysis_payload(
     business_goal: str,
     cleaning_reports: dict,
     dataset_profiles: dict,
@@ -495,6 +491,18 @@ def build_analysis_prompt(
     machine_findings: dict,
     join_key_report: dict,
 ):
+    return {
+        "business_goal": business_goal,
+        "cleaning_reports": cleaning_reports,
+        "dataset_profiles": dataset_profiles,
+        "dataset_category_insights": dataset_category_insights,
+        "dataset_numeric_summaries": dataset_numeric_summaries,
+        "machine_findings": machine_findings,
+        "join_key_report": join_key_report,
+    }
+
+
+def build_analysis_prompt_from_payload(payload: dict):
     return f"""
 You are a senior strategy consultant, customer experience expert, and data analyst.
 
@@ -513,34 +521,28 @@ The machine has already performed initial data handling and cleaning on all uplo
 - initial profiling and summary tables
 
 Business goal:
-{business_goal}
+{payload["business_goal"]}
 
 Cleaning reports:
-{json.dumps(cleaning_reports, indent=2, default=str)}
+{json.dumps(payload["cleaning_reports"], indent=2, default=str)}
 
 Dataset profiles after cleaning:
-{json.dumps(dataset_profiles, indent=2, default=str)}
+{json.dumps(payload["dataset_profiles"], indent=2, default=str)}
 
 Category insights:
-{json.dumps(dataset_category_insights, indent=2, default=str)}
+{json.dumps(payload["dataset_category_insights"], indent=2, default=str)}
 
 Numeric summaries:
-{json.dumps(dataset_numeric_summaries, indent=2, default=str)}
+{json.dumps(payload["dataset_numeric_summaries"], indent=2, default=str)}
 
 Machine-generated findings:
-{json.dumps(machine_findings, indent=2, default=str)}
+{json.dumps(payload["machine_findings"], indent=2, default=str)}
 
 Possible join keys across datasets:
-{json.dumps(join_key_report, indent=2, default=str)}
+{json.dumps(payload["join_key_report"], indent=2, default=str)}
 
 Instructions:
-1. First acknowledge any important data quality limitations that still remain.
-2. Analyze the cleaned datasets collectively.
-3. If the datasets appear linkable through common keys, explain what deeper joined analysis would unlock.
-4. Do not invent relationships if not supported by the summaries.
-5. Use a business strategy tone suitable for senior leadership.
-6. Keep the output practical, concise, and presentation-ready.
-7. Return STRICT JSON only using this exact schema:
+Return strict JSON only using this exact schema:
 {{
   "executive_problem_statement": "...",
   "key_insights": ["...", "...", "..."],
@@ -578,41 +580,17 @@ Instructions:
     "expected_productivity_gain": "..."
   }}
 }}
-
-If evidence is weak or incomplete, say so clearly in the relevant fields.
 """.strip()
 
 
-def call_groq_json(api_key: str, model_name: str, prompt: str) -> Tuple[dict | None, str]:
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model_name,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a senior strategy consultant and data analyst. Return strict JSON only.",
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-
+def call_n8n_webhook(webhook_url: str, payload: dict) -> Tuple[dict | None, str]:
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=180)
+        response = requests.post(webhook_url, json=payload, timeout=180)
         response.raise_for_status()
         data = response.json()
-        text = data["choices"][0]["message"]["content"]
-        return json.loads(text), text
+        return data, json.dumps(data)
     except Exception as e:
-        return None, f"Groq error: {e}"
+        return None, f"n8n webhook error: {e}"
 
 
 def safe_list(value):
@@ -637,7 +615,7 @@ def add_bullets(tf, bullets, level=0, font_size=20):
         p.font.size = Pt(font_size)
 
 
-def _set_title_and_body(slide, title_text: str, bullets: list[str] | None = None, body_text: str | None = None):
+def _set_title_and_body(slide, title_text: str, bullets=None, body_text: str | None = None):
     title_set = False
     body_set = False
 
@@ -647,11 +625,6 @@ def _set_title_and_body(slide, title_text: str, bullets: list[str] | None = None
 
     for shape in slide.placeholders:
         if getattr(shape, "placeholder_format", None) is None:
-            continue
-        ph_type = shape.placeholder_format.type
-        if not title_set and str(ph_type).lower().endswith("title"):
-            shape.text = title_text
-            title_set = True
             continue
         if not body_set and shape.has_text_frame and shape != getattr(slide.shapes, "title", None):
             tf = shape.text_frame
@@ -688,7 +661,6 @@ def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery 
     while len(prs.slides) < required_slides:
         prs.slides.add_slide(prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0])
 
-    # Slide 1
     slide = prs.slides[0]
     _set_title_and_body(
         slide,
@@ -698,7 +670,6 @@ def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery 
         ),
     )
 
-    # Slide 2
     slide = prs.slides[1]
     _set_title_and_body(
         slide,
@@ -706,15 +677,14 @@ def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery 
         body_text=executive_json.get("executive_problem_statement", ""),
     )
 
-    # Slide 3
     slide = prs.slides[2]
     _set_title_and_body(slide, "Key Insights from Data", bullets=safe_list(executive_json.get("key_insights")))
 
-    # Slide 4
     slide = prs.slides[3]
-    _set_title_and_body(slide, "Root Cause Hypotheses", bullets=safe_list(executive_json.get("root_cause_hypotheses")))
+    _set_title_and_body(
+        slide, "Root Cause Hypotheses", bullets=safe_list(executive_json.get("root_cause_hypotheses"))
+    )
 
-    # Slide 5
     initiative_bullets = []
     for item in safe_list(executive_json.get("initiative_opportunities")):
         initiative_bullets.append(
@@ -724,7 +694,6 @@ def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery 
     slide = prs.slides[4]
     _set_title_and_body(slide, "Initiative Opportunities", bullets=initiative_bullets)
 
-    # Slide 6
     kpi_bullets = []
     for item in safe_list(executive_json.get("kpi_recommendations")):
         kpi_bullets.append(
@@ -734,7 +703,6 @@ def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery 
     slide = prs.slides[5]
     _set_title_and_body(slide, "KPI Recommendations", bullets=kpi_bullets)
 
-    # Slide 7
     plan = executive_json.get("execution_plan_30_60_90", {})
     summary = executive_json.get("slide_ready_summary", {})
     final_bullets = [
@@ -813,14 +781,12 @@ def render_executive_output(data: dict):
 with st.sidebar:
     st.header("Settings")
     business_goal = st.text_area("Business goal", value=DEFAULT_BUSINESS_GOAL, height=120)
-    auto_call_brain = st.toggle("Auto-call brain", value=True)
-    groq_api_key = st.text_input(
-        "Groq API key",
-        type="password",
-        value=st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else "",
+    auto_call_n8n = st.toggle("Auto-call n8n backend", value=True)
+    n8n_webhook_url = st.text_input(
+        "n8n webhook URL",
+        value=st.secrets.get("N8N_WEBHOOK_URL", "") if hasattr(st, "secrets") else "",
     )
-    model_name = st.text_input("Brain model", value=DEFAULT_MODEL)
-    st.caption("For deployment, store the key in Streamlit secrets as GROQ_API_KEY.")
+    st.caption("For deployment, store the webhook in Streamlit secrets as N8N_WEBHOOK_URL.")
     st.caption("Optional: add template_exec_deck.pptx to the repo root for branded slides.")
 
 
@@ -839,7 +805,7 @@ with tab1:
         "Upload CSV or Excel files",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=True,
-        help="Upload one or more datasets. Streamlit supports file uploads, with a default 200 MB limit per file.",
+        help="Upload one or more datasets.",
     )
 
     run_analysis = st.button("Run Analysis", type="primary", use_container_width=True)
@@ -858,8 +824,10 @@ with tab1:
                     if df is None:
                         st.warning(f"Skipped unsupported file: {file.name}")
                         continue
+
                     dataset_name = re.sub(r"\.[^.]+$", "", file.name)
                     raw_datasets[dataset_name] = df
+
                     cleaned_df, report = clean_dataframe(df, dataset_name=dataset_name)
                     cleaned_datasets[dataset_name] = cleaned_df
                     cleaning_reports[dataset_name] = report
@@ -872,7 +840,8 @@ with tab1:
                     dataset_numeric_summaries = {name: get_numeric_summary(df) for name, df in cleaned_datasets.items()}
                     join_key_report = detect_possible_join_keys(cleaned_datasets)
                     machine_findings = build_machine_findings(cleaned_datasets)
-                    prompt = build_analysis_prompt(
+
+                    payload = build_analysis_payload(
                         business_goal,
                         cleaning_reports,
                         dataset_profiles,
@@ -881,6 +850,8 @@ with tab1:
                         machine_findings,
                         join_key_report,
                     )
+
+                    prompt = build_analysis_prompt_from_payload(payload)
 
                     st.session_state.cleaned_datasets = cleaned_datasets
                     st.session_state.cleaning_reports = cleaning_reports
@@ -895,10 +866,9 @@ with tab1:
                     st.session_state.executive_json = None
                     st.session_state.ppt_bytes = None
 
-                    # Automatically call the AI brain
-                    if auto_call_brain and groq_api_key:
-                        with st.spinner("Calling the brain for executive insights..."):
-                            parsed_json, raw_text = call_groq_json(groq_api_key, model_name, prompt)
+                    if auto_call_n8n and n8n_webhook_url:
+                        with st.spinner("Calling n8n backend..."):
+                            parsed_json, raw_text = call_n8n_webhook(n8n_webhook_url, payload)
 
                         if parsed_json is not None:
                             st.session_state.executive_json = parsed_json
@@ -935,21 +905,21 @@ with tab2:
             render_executive_output(st.session_state.executive_json)
         else:
             st.warning("Executive insights are not generated yet.")
-            st.markdown("**Option A: Auto mode** — enter a working Groq API key in the sidebar and rerun analysis.")
-            st.markdown("**Option B: Manual mode** — copy the prompt below into your preferred LLM, then paste the JSON result back here.")
+            st.markdown("**Option A: Auto mode** — enter a working n8n webhook URL in the sidebar and rerun analysis.")
+            st.markdown("**Option B: Manual mode** — copy the prompt below into any tool, then paste the JSON result back here.")
 
-            st.subheader("Prompt for the brain")
+            st.subheader("Prompt")
             st.code(st.session_state.generated_prompt, language="text")
 
             pasted_json = st.text_area(
-                "Paste Gemini JSON output here",
+                "Paste JSON output here",
                 height=320,
-                placeholder='Paste the model JSON response here...',
+                placeholder="Paste the model or mock JSON response here...",
             )
             if st.button("Use Pasted JSON", use_container_width=True):
                 parsed = parse_fallback_json(pasted_json)
                 if parsed is None:
-                    st.error("That is not valid JSON. Paste the exact JSON output from Gemini.")
+                    st.error("That is not valid JSON. Paste the exact JSON output.")
                 else:
                     st.session_state.executive_json = parsed
                     st.session_state.analysis_output = pasted_json
@@ -988,15 +958,16 @@ with tab4:
 4. Open **Executive Insights**.
 5. Open **Slides** and click **Download PowerPoint**.
 
-### Best demo mode
-- Use **Auto-call brain** with a Groq API key stored in Streamlit secrets.
-- Keep `template_exec_deck.pptx` in the repo root so every deck uses the same design.
+### Demo backend mode
+- The app calls an **n8n webhook**.
+- n8n returns a **predefined JSON response**.
+- This makes the demo stable and avoids live model/API quota issues.
 
 ### Template file
 - File name: `template_exec_deck.pptx`
 - Place it in the same folder as `app.py`.
 - The app uses the first 7 slides of the template.
-- Each of those slides should have a title placeholder and either a body placeholder or a text box area for content.
+- Each slide should have a title placeholder and either a body placeholder or a text box area for content.
 
 ### Recommended requirements.txt
 ```txt
@@ -1008,6 +979,3 @@ numpy
 python-dateutil
 python-pptx
 requests
-```
-        """
-    )
