@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import json
 import difflib
@@ -8,16 +9,11 @@ import duckdb
 import numpy as np
 import pandas as pd
 import streamlit as st
+import requests
 from dateutil import parser
 from pptx import Presentation
 from pptx.util import Inches, Pt
 
-try:
-    from google import genai
-    from google.genai import types
-except Exception:
-    genai = None
-    types = None
 
 
 # -----------------------------
@@ -114,7 +110,7 @@ DEFAULT_BUSINESS_GOAL = (
     "and reduce analyst time spent on manual data cleaning, analysis, and brainstorming."
 )
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 
 
 # -----------------------------
@@ -587,23 +583,36 @@ If evidence is weak or incomplete, say so clearly in the relevant fields.
 """.strip()
 
 
-def call_gemini_json(api_key: str, model_name: str, prompt: str) -> Tuple[dict | None, str]:
-    if genai is None or types is None:
-        return None, "google-genai is not installed. Add it to requirements.txt."
+def call_groq_json(api_key: str, model_name: str, prompt: str) -> Tuple[dict | None, str]:
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a senior strategy consultant and data analyst. Return strict JSON only.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                response_mime_type="application/json",
-            ),
-        )
-        text = response.text or ""
+        response = requests.post(url, headers=headers, json=payload, timeout=180)
+        response.raise_for_status()
+        data = response.json()
+        text = data["choices"][0]["message"]["content"]
         return json.loads(text), text
     except Exception as e:
-        return None, f"Gemini error: {e}"
+        return None, f"Groq error: {e}"
 
 
 def safe_list(value):
@@ -628,80 +637,117 @@ def add_bullets(tf, bullets, level=0, font_size=20):
         p.font.size = Pt(font_size)
 
 
-def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery Agent") -> bytes:
-    prs = Presentation()
+def _set_title_and_body(slide, title_text: str, bullets: list[str] | None = None, body_text: str | None = None):
+    title_set = False
+    body_set = False
 
-    # Title slide
-    slide = prs.slides.add_slide(prs.slide_layouts[0])
-    slide.shapes.title.text = executive_json.get("slide_ready_summary", {}).get("slide_title", app_title)
-    slide.placeholders[1].text = executive_json.get("slide_ready_summary", {}).get(
-        "subtitle", "Executive summary generated from uploaded datasets"
+    if hasattr(slide.shapes, "title") and slide.shapes.title is not None:
+        slide.shapes.title.text = title_text
+        title_set = True
+
+    for shape in slide.placeholders:
+        if getattr(shape, "placeholder_format", None) is None:
+            continue
+        ph_type = shape.placeholder_format.type
+        if not title_set and str(ph_type).lower().endswith("title"):
+            shape.text = title_text
+            title_set = True
+            continue
+        if not body_set and shape.has_text_frame and shape != getattr(slide.shapes, "title", None):
+            tf = shape.text_frame
+            if bullets is not None:
+                add_bullets(tf, bullets, font_size=18)
+            else:
+                tf.clear()
+                tf.paragraphs[0].text = body_text or ""
+                tf.paragraphs[0].font.size = Pt(20)
+            body_set = True
+
+    if not title_set:
+        tx = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.6))
+        p = tx.text_frame.paragraphs[0]
+        p.text = title_text
+        p.font.size = Pt(24)
+        p.font.bold = True
+
+    if not body_set:
+        tx = slide.shapes.add_textbox(Inches(0.7), Inches(1.4), Inches(8.8), Inches(4.8))
+        tf = tx.text_frame
+        if bullets is not None:
+            add_bullets(tf, bullets, font_size=18)
+        else:
+            tf.paragraphs[0].text = body_text or ""
+            tf.paragraphs[0].font.size = Pt(20)
+
+
+def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery Agent") -> bytes:
+    template_path = "template_exec_deck.pptx"
+    prs = Presentation(template_path) if os.path.exists(template_path) else Presentation()
+
+    required_slides = 7
+    while len(prs.slides) < required_slides:
+        prs.slides.add_slide(prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0])
+
+    # Slide 1
+    slide = prs.slides[0]
+    _set_title_and_body(
+        slide,
+        executive_json.get("slide_ready_summary", {}).get("slide_title", app_title),
+        body_text=executive_json.get("slide_ready_summary", {}).get(
+            "subtitle", "Executive summary generated from uploaded datasets"
+        ),
     )
 
-    # Executive problem statement
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "Executive Problem Statement"
-    slide.placeholders[1].text = executive_json.get("executive_problem_statement", "")
+    # Slide 2
+    slide = prs.slides[1]
+    _set_title_and_body(
+        slide,
+        "Executive Problem Statement",
+        body_text=executive_json.get("executive_problem_statement", ""),
+    )
 
-    # Key insights
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "Key Insights from Data"
-    add_bullets(slide.placeholders[1].text_frame, safe_list(executive_json.get("key_insights")), font_size=20)
+    # Slide 3
+    slide = prs.slides[2]
+    _set_title_and_body(slide, "Key Insights from Data", bullets=safe_list(executive_json.get("key_insights")))
 
-    # Root causes
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "Root Cause Hypotheses"
-    add_bullets(slide.placeholders[1].text_frame, safe_list(executive_json.get("root_cause_hypotheses")), font_size=20)
+    # Slide 4
+    slide = prs.slides[3]
+    _set_title_and_body(slide, "Root Cause Hypotheses", bullets=safe_list(executive_json.get("root_cause_hypotheses")))
 
-    # Initiative opportunities
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "Initiative Opportunities"
-    bullets = []
+    # Slide 5
+    initiative_bullets = []
     for item in safe_list(executive_json.get("initiative_opportunities")):
-        bullets.append(
+        initiative_bullets.append(
             f"{item.get('initiative_name', 'Initiative')}: {item.get('issue_solved', '')} | "
             f"Value: {item.get('expected_business_value', '')} | Effort: {item.get('effort_level', '')}"
         )
-    add_bullets(slide.placeholders[1].text_frame, bullets, font_size=18)
+    slide = prs.slides[4]
+    _set_title_and_body(slide, "Initiative Opportunities", bullets=initiative_bullets)
 
-    # KPI recommendations
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "KPI Recommendations"
-    bullets = []
+    # Slide 6
+    kpi_bullets = []
     for item in safe_list(executive_json.get("kpi_recommendations")):
-        bullets.append(
+        kpi_bullets.append(
             f"Leading KPI: {item.get('leading_kpi', '')} | Lagging KPI: {item.get('lagging_kpi', '')} | "
             f"Baseline: {item.get('suggested_baseline', '')} | Target: {item.get('suggested_target', '')}"
         )
-    add_bullets(slide.placeholders[1].text_frame, bullets, font_size=18)
+    slide = prs.slides[5]
+    _set_title_and_body(slide, "KPI Recommendations", bullets=kpi_bullets)
 
-    # 30-60-90 plan
-    slide = prs.slides.add_slide(prs.slide_layouts[5])
-    slide.shapes.title.text = "30-60-90 Day Execution Plan"
-    left = Inches(0.5)
-    top = Inches(1.5)
-    width = Inches(9)
-    height = Inches(4.5)
-    tx = slide.shapes.add_textbox(left, top, width, height)
-    tf = tx.text_frame
+    # Slide 7
     plan = executive_json.get("execution_plan_30_60_90", {})
-    bullets = [
+    summary = executive_json.get("slide_ready_summary", {})
+    final_bullets = [
         "0-30 days: " + " | ".join(safe_list(plan.get("days_0_30"))),
         "31-60 days: " + " | ".join(safe_list(plan.get("days_31_60"))),
         "61-90 days: " + " | ".join(safe_list(plan.get("days_61_90"))),
+    ] + safe_list(summary.get("bullets")) + [
+        f"Suggested chart: {summary.get('suggested_chart', '')}",
+        f"Expected business impact: {summary.get('expected_business_impact', '')}",
+        f"Expected productivity gain: {summary.get('expected_productivity_gain', '')}",
     ]
-    add_bullets(tf, bullets, font_size=18)
-
-    # Final summary
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "Slide-ready Executive Summary"
-    srs = executive_json.get("slide_ready_summary", {})
-    bullets = safe_list(srs.get("bullets")) + [
-        f"Suggested chart: {srs.get('suggested_chart', '')}",
-        f"Expected business impact: {srs.get('expected_business_impact', '')}",
-        f"Expected productivity gain: {srs.get('expected_productivity_gain', '')}",
-    ]
-    add_bullets(slide.placeholders[1].text_frame, bullets, font_size=18)
+    slide = prs.slides[6]
+    _set_title_and_body(slide, "Execution Plan & Summary", bullets=final_bullets)
 
     output = io.BytesIO()
     prs.save(output)
@@ -767,10 +813,15 @@ def render_executive_output(data: dict):
 with st.sidebar:
     st.header("Settings")
     business_goal = st.text_area("Business goal", value=DEFAULT_BUSINESS_GOAL, height=120)
-    auto_call_gemini = st.toggle("Auto-call Gemini", value=False)
-    gemini_api_key = st.text_input("Gemini API key", type="password")
-    model_name = st.text_input("Gemini model", value=DEFAULT_MODEL)
-    st.caption("Tip: If you do not have working API quota, turn off Auto-call Gemini and use manual paste mode.")
+    auto_call_brain = st.toggle("Auto-call brain", value=True)
+    groq_api_key = st.text_input(
+        "Groq API key",
+        type="password",
+        value=st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else "",
+    )
+    model_name = st.text_input("Brain model", value=DEFAULT_MODEL)
+    st.caption("For deployment, store the key in Streamlit secrets as GROQ_API_KEY.")
+    st.caption("Optional: add template_exec_deck.pptx to the repo root for branded slides.")
 
 
 # -----------------------------
@@ -844,11 +895,14 @@ with tab1:
                     st.session_state.executive_json = None
                     st.session_state.ppt_bytes = None
 
-                    if auto_call_gemini and gemini_api_key:
-                        with st.spinner("Calling Gemini for executive insights..."):
-                            parsed_json, raw_text = call_gemini_json(gemini_api_key, model_name, prompt)
+                    if auto_call_brain and groq_api_key:
+                        with st.spinner("Calling the brain for executive insights..."):
+                            parsed_json, raw_text = call_groq_json(groq_api_key, model_name, prompt)
                             if parsed_json is not None:
                                 st.session_state.executive_json = parsed_json
+                                st.session_state.analysis_output = raw_text
+                                st.session_state.ppt_bytes = create_pptx(parsed_json)
+                            else:
                                 st.session_state.analysis_output = raw_text
                                 st.session_state.ppt_bytes = create_pptx(parsed_json)
                             else:
@@ -882,16 +936,16 @@ with tab2:
             render_executive_output(st.session_state.executive_json)
         else:
             st.warning("Executive insights are not generated yet.")
-            st.markdown("**Option A: Auto mode** — enter a working Gemini API key in the sidebar and rerun analysis.")
-            st.markdown("**Option B: Manual mode** — copy the prompt below into AI Studio, then paste the JSON result back here.")
+            st.markdown("**Option A: Auto mode** — enter a working Groq API key in the sidebar and rerun analysis.")
+            st.markdown("**Option B: Manual mode** — copy the prompt below into your preferred LLM, then paste the JSON result back here.")
 
-            st.subheader("Prompt for Gemini")
+            st.subheader("Prompt for the brain")
             st.code(st.session_state.generated_prompt, language="text")
 
             pasted_json = st.text_area(
                 "Paste Gemini JSON output here",
                 height=320,
-                placeholder='Paste the model\'s JSON response here...',
+                placeholder='Paste the model JSON response here...',
             )
             if st.button("Use Pasted JSON", use_container_width=True):
                 parsed = parse_fallback_json(pasted_json)
@@ -933,12 +987,17 @@ with tab4:
 2. Upload the datasets.
 3. Click **Run Analysis**.
 4. Open **Executive Insights**.
-5. If Auto-call Gemini is off, copy the prompt into AI Studio, then paste the JSON output back into the app.
-6. Open **Slides** and click **Download PowerPoint**.
+5. Open **Slides** and click **Download PowerPoint**.
 
 ### Best demo mode
-- Use **Auto-call Gemini** only if you have a working key and quota.
-- For the safest presentation handover, use **manual mode** so the app still works even if the API is unavailable.
+- Use **Auto-call brain** with a Groq API key stored in Streamlit secrets.
+- Keep `template_exec_deck.pptx` in the repo root so every deck uses the same design.
+
+### Template file
+- File name: `template_exec_deck.pptx`
+- Place it in the same folder as `app.py`.
+- The app uses the first 7 slides of the template.
+- Each of those slides should have a title placeholder and either a body placeholder or a text box area for content.
 
 ### Recommended requirements.txt
 ```txt
@@ -949,7 +1008,7 @@ openpyxl
 numpy
 python-dateutil
 python-pptx
-google-genai
+requests
 ```
         """
     )
