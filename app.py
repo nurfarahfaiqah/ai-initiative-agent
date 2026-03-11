@@ -894,7 +894,7 @@ with tab1:
                         if parsed_json is not None:
                             st.session_state.executive_json = parsed_json
                             st.session_state.analysis_output = raw_text
-                            st.session_state.ppt_bytes = create_pptx(parsed_json)
+                            st.session_state.ppt_bytes = create_pptx(executive_json)
                         else:
                             st.session_state.analysis_output = raw_text
 
