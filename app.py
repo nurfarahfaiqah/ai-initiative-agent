@@ -653,69 +653,90 @@ def _set_title_and_body(slide, title_text: str, bullets=None, body_text: str | N
             tf.paragraphs[0].font.size = Pt(20)
 
 
-def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery Agent") -> bytes:
-    template_path = "template_exec_deck.pptx"
-    prs = Presentation(template_path) if os.path.exists(template_path) else Presentation()
+def create_pptx(executive_json):
 
-    required_slides = 7
-    while len(prs.slides) < required_slides:
-        prs.slides.add_slide(prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0])
+    prs = Presentation("template_exec_deck.pptx")
 
-    slide = prs.slides[0]
-    _set_title_and_body(
-        slide,
-        executive_json.get("slide_ready_summary", {}).get("slide_title", app_title),
-        body_text=executive_json.get("slide_ready_summary", {}).get(
-            "subtitle", "Executive summary generated from uploaded datasets"
-        ),
-    )
+    def fill_slide(layout_index, title, bullets):
+        slide = prs.slides.add_slide(prs.slide_layouts[layout_index])
+        slide.shapes.title.text = title
 
-    slide = prs.slides[1]
-    _set_title_and_body(
-        slide,
+        tf = slide.placeholders[1].text_frame
+        tf.clear()
+
+        for i, bullet in enumerate(bullets):
+            if i == 0:
+                p = tf.paragraphs[0]
+            else:
+                p = tf.add_paragraph()
+
+            p.text = str(bullet)
+            p.level = 0
+
+    # Title slide
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    slide.shapes.title.text = executive_json["slide_ready_summary"]["slide_title"]
+    slide.placeholders[1].text = executive_json["slide_ready_summary"]["subtitle"]
+
+    # Problem statement
+    fill_slide(
+        1,
         "Executive Problem Statement",
-        body_text=executive_json.get("executive_problem_statement", ""),
+        [executive_json["executive_problem_statement"]],
     )
 
-    slide = prs.slides[2]
-    _set_title_and_body(slide, "Key Insights from Data", bullets=safe_list(executive_json.get("key_insights")))
-
-    slide = prs.slides[3]
-    _set_title_and_body(
-        slide, "Root Cause Hypotheses", bullets=safe_list(executive_json.get("root_cause_hypotheses"))
+    # Insights
+    fill_slide(
+        1,
+        "Key Insights",
+        executive_json["key_insights"],
     )
 
-    initiative_bullets = []
-    for item in safe_list(executive_json.get("initiative_opportunities")):
-        initiative_bullets.append(
-            f"{item.get('initiative_name', 'Initiative')}: {item.get('issue_solved', '')} | "
-            f"Value: {item.get('expected_business_value', '')} | Effort: {item.get('effort_level', '')}"
-        )
-    slide = prs.slides[4]
-    _set_title_and_body(slide, "Initiative Opportunities", bullets=initiative_bullets)
+    # Root causes
+    fill_slide(
+        1,
+        "Root Cause Hypotheses",
+        executive_json["root_cause_hypotheses"],
+    )
 
-    kpi_bullets = []
-    for item in safe_list(executive_json.get("kpi_recommendations")):
-        kpi_bullets.append(
-            f"Leading KPI: {item.get('leading_kpi', '')} | Lagging KPI: {item.get('lagging_kpi', '')} | "
-            f"Baseline: {item.get('suggested_baseline', '')} | Target: {item.get('suggested_target', '')}"
-        )
-    slide = prs.slides[5]
-    _set_title_and_body(slide, "KPI Recommendations", bullets=kpi_bullets)
-
-    plan = executive_json.get("execution_plan_30_60_90", {})
-    summary = executive_json.get("slide_ready_summary", {})
-    final_bullets = [
-        "0-30 days: " + " | ".join(safe_list(plan.get("days_0_30"))),
-        "31-60 days: " + " | ".join(safe_list(plan.get("days_31_60"))),
-        "61-90 days: " + " | ".join(safe_list(plan.get("days_61_90"))),
-    ] + safe_list(summary.get("bullets")) + [
-        f"Suggested chart: {summary.get('suggested_chart', '')}",
-        f"Expected business impact: {summary.get('expected_business_impact', '')}",
-        f"Expected productivity gain: {summary.get('expected_productivity_gain', '')}",
+    # Initiatives
+    initiatives = [
+        f"{i['initiative_name']} — {i['issue_solved']} (Effort: {i['effort_level']})"
+        for i in executive_json["initiative_opportunities"]
     ]
-    slide = prs.slides[6]
-    _set_title_and_body(slide, "Execution Plan & Summary", bullets=final_bullets)
+
+    fill_slide(
+        1,
+        "Initiative Opportunities",
+        initiatives,
+    )
+
+    # KPI
+    kpis = [
+        f"{k['leading_kpi']} → Target: {k['suggested_target']}"
+        for k in executive_json["kpi_recommendations"]
+    ]
+
+    fill_slide(
+        1,
+        "KPI Recommendations",
+        kpis,
+    )
+
+    # Execution
+    plan = executive_json["execution_plan_30_60_90"]
+
+    plan_bullets = (
+        ["0-30 days: " + ", ".join(plan["days_0_30"])]
+        + ["31-60 days: " + ", ".join(plan["days_31_60"])]
+        + ["61-90 days: " + ", ".join(plan["days_61_90"])]
+    )
+
+    fill_slide(
+        1,
+        "Execution Plan",
+        plan_bullets,
+    )
 
     output = io.BytesIO()
     prs.save(output)
