@@ -1089,4 +1089,4 @@ openpyxl
 numpy
 python-dateutil
 python-pptx
-requests
+requests"""
