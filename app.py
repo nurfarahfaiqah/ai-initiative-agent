@@ -3,7 +3,7 @@ import os
 import re
 import json
 import difflib
-from typing import Dict, Tuple, Any
+from typing import Dict, Any, Optional, Tuple
 
 import duckdb
 import numpy as np
@@ -13,6 +13,7 @@ import streamlit as st
 from dateutil import parser
 from pptx import Presentation
 from pptx.util import Inches, Pt
+from pptx.enum.shapes import PP_PLACEHOLDER
 
 
 # -----------------------------
@@ -113,7 +114,7 @@ DEFAULT_BUSINESS_GOAL = (
 # -----------------------------
 # Session state defaults
 # -----------------------------
-for key, value in {
+defaults = {
     "analysis_complete": False,
     "analysis_output": "",
     "ppt_bytes": None,
@@ -126,7 +127,8 @@ for key, value in {
     "machine_findings": {},
     "join_key_report": {},
     "executive_json": None,
-}.items():
+}
+for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
@@ -161,7 +163,7 @@ def normalize_for_match(x: Any):
     return x
 
 
-def detect_column_semantic_type(col_name: str):
+def detect_column_semantic_type(col_name: str) -> Optional[str]:
     col = col_name.lower()
     if col in IMPORTANT_COLUMN_HINTS:
         return IMPORTANT_COLUMN_HINTS[col]
@@ -174,7 +176,11 @@ def detect_column_semantic_type(col_name: str):
     return None
 
 
-def standardize_categorical_values(df: pd.DataFrame, max_unique_ratio: float = 0.2, fuzzy_threshold: float = 0.88):
+def standardize_categorical_values(
+    df: pd.DataFrame,
+    max_unique_ratio: float = 0.2,
+    fuzzy_threshold: float = 0.88,
+) -> Tuple[pd.DataFrame, dict]:
     df = df.copy()
     standardization_report = {}
 
@@ -245,14 +251,16 @@ def standardize_categorical_values(df: pd.DataFrame, max_unique_ratio: float = 0
     return df, standardization_report
 
 
-def try_parse_dates(df: pd.DataFrame, threshold: float = 0.7):
+def try_parse_dates(df: pd.DataFrame, threshold: float = 0.7) -> Tuple[pd.DataFrame, list]:
     df = df.copy()
     converted_cols = []
+
     for col in df.columns:
         if df[col].dtype == "object":
             sample = df[col].dropna().astype(str).head(50)
             if len(sample) == 0:
                 continue
+
             parsed_success = 0
             for val in sample:
                 try:
@@ -260,42 +268,48 @@ def try_parse_dates(df: pd.DataFrame, threshold: float = 0.7):
                     parsed_success += 1
                 except Exception:
                     pass
+
             if (parsed_success / len(sample)) >= threshold:
                 try:
                     df[col] = pd.to_datetime(df[col], errors="coerce")
                     converted_cols.append(col)
                 except Exception:
                     pass
+
     return df, converted_cols
 
 
-def try_parse_numeric(df: pd.DataFrame, threshold: float = 0.8):
+def try_parse_numeric(df: pd.DataFrame, threshold: float = 0.8) -> Tuple[pd.DataFrame, list]:
     df = df.copy()
     converted_cols = []
+
     for col in df.columns:
         if df[col].dtype == "object":
             series = df[col].dropna().astype(str).str.replace(",", "", regex=False).str.strip()
             if len(series) == 0:
                 continue
+
             numeric_series = pd.to_numeric(series, errors="coerce")
             if numeric_series.notna().mean() >= threshold:
                 df[col] = pd.to_numeric(
                     df[col].astype(str).str.replace(",", "", regex=False), errors="coerce"
                 )
                 converted_cols.append(col)
+
     return df, converted_cols
 
 
-def remove_duplicates(df: pd.DataFrame):
+def remove_duplicates(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     before = len(df)
     df = df.drop_duplicates()
     after = len(df)
     return df, before - after
 
 
-def handle_missing_values(df: pd.DataFrame):
+def handle_missing_values(df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]:
     df = df.copy()
     fill_report = {}
+
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
             missing_count = int(df[col].isna().sum())
@@ -318,33 +332,39 @@ def handle_missing_values(df: pd.DataFrame):
                     "strategy": "filled_text_with_mode_or_unknown",
                     "missing_filled": missing_count,
                 }
+
     return df, fill_report
 
 
-def detect_outliers_iqr(df: pd.DataFrame):
+def detect_outliers_iqr(df: pd.DataFrame) -> dict:
     outlier_report = {}
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
     for col in numeric_cols:
         series = df[col].dropna()
         if len(series) < 5:
             continue
+
         q1 = series.quantile(0.25)
         q3 = series.quantile(0.75)
         iqr = q3 - q1
         if iqr == 0:
             continue
+
         lower = q1 - 1.5 * iqr
         upper = q3 + 1.5 * iqr
         count = int(((df[col] < lower) | (df[col] > upper)).sum())
+
         outlier_report[col] = {
             "outlier_count": count,
             "lower_bound": float(lower),
             "upper_bound": float(upper),
         }
+
     return outlier_report
 
 
-def clean_dataframe(df: pd.DataFrame, dataset_name: str = "dataset"):
+def clean_dataframe(df: pd.DataFrame, dataset_name: str = "dataset") -> Tuple[pd.DataFrame, dict]:
     original_shape = df.shape
     df = df.copy()
     cleaning_report = {
@@ -385,23 +405,27 @@ def clean_dataframe(df: pd.DataFrame, dataset_name: str = "dataset"):
 
     cleaning_report["final_rows"] = int(df.shape[0])
     cleaning_report["final_columns"] = int(df.shape[1])
+
     return df, cleaning_report
 
 
-def load_file(uploaded_file) -> pd.DataFrame | None:
+def load_file(uploaded_file) -> Optional[pd.DataFrame]:
     lower = uploaded_file.name.lower()
+
     if lower.endswith(".csv"):
         try:
             return pd.read_csv(uploaded_file)
         except UnicodeDecodeError:
             uploaded_file.seek(0)
             return pd.read_csv(uploaded_file, encoding="latin1")
+
     if lower.endswith(".xlsx") or lower.endswith(".xls"):
         return pd.read_excel(uploaded_file)
+
     return None
 
 
-def profile_dataframe(df: pd.DataFrame):
+def profile_dataframe(df: pd.DataFrame) -> dict:
     return {
         "rows": int(df.shape[0]),
         "columns": int(df.shape[1]),
@@ -412,29 +436,32 @@ def profile_dataframe(df: pd.DataFrame):
     }
 
 
-def get_top_categories(df: pd.DataFrame, max_cols: int = 5, top_n: int = 5):
+def get_top_categories(df: pd.DataFrame, max_cols: int = 5, top_n: int = 5) -> dict:
     results = {}
     object_cols = df.select_dtypes(include=["object"]).columns.tolist()
+
     for col in object_cols[:max_cols]:
         try:
             results[col] = df[col].astype(str).value_counts(dropna=False).head(top_n).to_dict()
         except Exception:
             pass
+
     return results
 
 
-def get_numeric_summary(df: pd.DataFrame):
+def get_numeric_summary(df: pd.DataFrame) -> dict:
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if not numeric_cols:
         return {}
     return df[numeric_cols].describe().round(2).to_dict()
 
 
-def detect_possible_join_keys(datasets_dict: Dict[str, pd.DataFrame]):
+def detect_possible_join_keys(datasets_dict: Dict[str, pd.DataFrame]) -> dict:
     all_columns = {}
     for dataset_name, df in datasets_dict.items():
         for col in df.columns:
             all_columns.setdefault(col, []).append(dataset_name)
+
     shared_columns = {col: ds_list for col, ds_list in all_columns.items() if len(ds_list) > 1}
     key_patterns = ["id", "account", "customer", "service", "number", "no"]
     likely_keys = {
@@ -445,7 +472,7 @@ def detect_possible_join_keys(datasets_dict: Dict[str, pd.DataFrame]):
     return {"shared_columns": shared_columns, "likely_join_keys": likely_keys}
 
 
-def build_machine_findings(datasets: Dict[str, pd.DataFrame]):
+def build_machine_findings(datasets: Dict[str, pd.DataFrame]) -> dict:
     con = duckdb.connect()
     findings = {}
 
@@ -490,7 +517,7 @@ def build_analysis_payload(
     dataset_numeric_summaries: dict,
     machine_findings: dict,
     join_key_report: dict,
-):
+) -> dict:
     return {
         "business_goal": business_goal,
         "cleaning_reports": cleaning_reports,
@@ -502,7 +529,7 @@ def build_analysis_payload(
     }
 
 
-def build_analysis_prompt_from_payload(payload: dict):
+def build_analysis_prompt_from_payload(payload: dict) -> str:
     return f"""
 You are a senior strategy consultant, customer experience expert, and data analyst.
 
@@ -583,7 +610,7 @@ Return strict JSON only using this exact schema:
 """.strip()
 
 
-def call_n8n_webhook(webhook_url: str, payload: dict) -> Tuple[dict | None, str]:
+def call_n8n_webhook(webhook_url: str, payload: dict) -> Tuple[Optional[dict], str]:
     try:
         response = requests.post(webhook_url, json=payload, timeout=180)
         response.raise_for_status()
@@ -593,153 +620,208 @@ def call_n8n_webhook(webhook_url: str, payload: dict) -> Tuple[dict | None, str]
         return None, f"n8n webhook error: {e}"
 
 
-def safe_list(value):
+def safe_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
-def parse_fallback_json(raw_text: str):
+def parse_fallback_json(raw_text: str) -> Optional[dict]:
     try:
         return json.loads(raw_text)
     except Exception:
         return None
 
 
-def add_bullets(tf, bullets, level=0, font_size=20):
-    tf.clear()
-    first = True
-    for bullet in bullets:
-        p = tf.paragraphs[0] if first else tf.add_paragraph()
-        first = False
+def add_bullets(text_frame, bullets, font_size: int = 18):
+    text_frame.clear()
+
+    if not bullets:
+        p = text_frame.paragraphs[0]
+        p.text = ""
+        p.font.size = Pt(font_size)
+        return
+
+    for i, bullet in enumerate(bullets):
+        p = text_frame.paragraphs[0] if i == 0 else text_frame.add_paragraph()
         p.text = str(bullet)
-        p.level = level
+        p.level = 0
         p.font.size = Pt(font_size)
 
 
-def _set_title_and_body(slide, title_text: str, bullets=None, body_text: str | None = None):
-    title_set = False
-    body_set = False
+def _get_placeholder_type(shape):
+    try:
+        return shape.placeholder_format.type
+    except Exception:
+        return None
 
-    if hasattr(slide.shapes, "title") and slide.shapes.title is not None:
-        slide.shapes.title.text = title_text
-        title_set = True
+
+def _find_title_placeholder(slide):
+    if getattr(slide.shapes, "title", None) is not None:
+        return slide.shapes.title
 
     for shape in slide.placeholders:
-        if getattr(shape, "placeholder_format", None) is None:
-            continue
-        if not body_set and shape.has_text_frame and shape != getattr(slide.shapes, "title", None):
-            tf = shape.text_frame
-            if bullets is not None:
-                add_bullets(tf, bullets, font_size=18)
-            else:
-                tf.clear()
-                tf.paragraphs[0].text = body_text or ""
-                tf.paragraphs[0].font.size = Pt(20)
-            body_set = True
+        ph_type = _get_placeholder_type(shape)
+        if ph_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
+            return shape
+    return None
 
-    if not title_set:
-        tx = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.6))
+
+def _find_body_placeholder(slide, prefer_subtitle: bool = False):
+    candidates = []
+
+    for shape in slide.placeholders:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+
+        ph_type = _get_placeholder_type(shape)
+
+        if ph_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
+            continue
+
+        if prefer_subtitle and ph_type == PP_PLACEHOLDER.SUBTITLE:
+            return shape
+
+        candidates.append(shape)
+
+    if candidates:
+        return candidates[0]
+
+    return None
+
+
+def _fill_slide(slide, title_text: str, bullets=None, body_text: str = "", prefer_subtitle: bool = False):
+    title_shape = _find_title_placeholder(slide)
+    body_shape = _find_body_placeholder(slide, prefer_subtitle=prefer_subtitle)
+
+    if title_shape is not None:
+        title_shape.text = title_text
+    else:
+        tx = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(0.8))
         p = tx.text_frame.paragraphs[0]
         p.text = title_text
         p.font.size = Pt(24)
         p.font.bold = True
 
-    if not body_set:
-        tx = slide.shapes.add_textbox(Inches(0.7), Inches(1.4), Inches(8.8), Inches(4.8))
+    if body_shape is not None:
+        tf = body_shape.text_frame
+        if bullets is not None:
+            add_bullets(tf, bullets, font_size=18)
+        else:
+            tf.clear()
+            p = tf.paragraphs[0]
+            p.text = body_text or ""
+            p.font.size = Pt(20)
+    else:
+        tx = slide.shapes.add_textbox(Inches(0.7), Inches(1.5), Inches(8.5), Inches(4.8))
         tf = tx.text_frame
         if bullets is not None:
             add_bullets(tf, bullets, font_size=18)
         else:
-            tf.paragraphs[0].text = body_text or ""
-            tf.paragraphs[0].font.size = Pt(20)
+            p = tf.paragraphs[0]
+            p.text = body_text or ""
+            p.font.size = Pt(20)
 
 
-def create_pptx(executive_json):
+def _ensure_minimum_slides(prs, required_slides: int = 7):
+    if len(prs.slides) >= required_slides:
+        return
 
-    prs = Presentation("template_exec_deck.pptx")
+    while len(prs.slides) < required_slides:
+        if len(prs.slides) == 0:
+            layout = prs.slide_layouts[0]
+        else:
+            layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
+        prs.slides.add_slide(layout)
 
-    def fill_slide(layout_index, title, bullets):
-        slide = prs.slides.add_slide(prs.slide_layouts[layout_index])
-        slide.shapes.title.text = title
 
-        tf = slide.placeholders[1].text_frame
-        tf.clear()
+def create_pptx(executive_json: dict, app_title: str = "AI Initiative Discovery Agent") -> bytes:
+    template_path = "template_exec_deck.pptx"
 
-        for i, bullet in enumerate(bullets):
-            if i == 0:
-                p = tf.paragraphs[0]
-            else:
-                p = tf.add_paragraph()
+    if os.path.exists(template_path):
+        prs = Presentation(template_path)
+    else:
+        prs = Presentation()
 
-            p.text = str(bullet)
-            p.level = 0
+    _ensure_minimum_slides(prs, required_slides=7)
 
-    # Title slide
-    slide = prs.slides.add_slide(prs.slide_layouts[0])
-    slide.shapes.title.text = executive_json["slide_ready_summary"]["slide_title"]
-    slide.placeholders[1].text = executive_json["slide_ready_summary"]["subtitle"]
+    slides = list(prs.slides)
 
-    # Problem statement
-    fill_slide(
-        1,
-        "Executive Problem Statement",
-        [executive_json["executive_problem_statement"]],
+    slide_ready = executive_json.get("slide_ready_summary", {})
+    plan = executive_json.get("execution_plan_30_60_90", {})
+
+    _fill_slide(
+        slides[0],
+        title_text=slide_ready.get("slide_title", app_title),
+        body_text=slide_ready.get("subtitle", "Executive summary generated from uploaded datasets"),
+        prefer_subtitle=True,
     )
 
-    # Insights
-    fill_slide(
-        1,
-        "Key Insights",
-        executive_json["key_insights"],
+    _fill_slide(
+        slides[1],
+        title_text="Executive Problem Statement",
+        body_text=executive_json.get("executive_problem_statement", ""),
     )
 
-    # Root causes
-    fill_slide(
-        1,
-        "Root Cause Hypotheses",
-        executive_json["root_cause_hypotheses"],
+    _fill_slide(
+        slides[2],
+        title_text="Key Insights from Data",
+        bullets=safe_list(executive_json.get("key_insights")),
     )
 
-    # Initiatives
-    initiatives = [
-        f"{i['initiative_name']} — {i['issue_solved']} (Effort: {i['effort_level']})"
-        for i in executive_json["initiative_opportunities"]
+    _fill_slide(
+        slides[3],
+        title_text="Root Cause Hypotheses",
+        bullets=safe_list(executive_json.get("root_cause_hypotheses")),
+    )
+
+    initiative_bullets = []
+    for item in safe_list(executive_json.get("initiative_opportunities")):
+        initiative_bullets.append(
+            f"{item.get('initiative_name', 'Initiative')} — "
+            f"{item.get('issue_solved', '')} | "
+            f"Value: {item.get('expected_business_value', '')} | "
+            f"Effort: {item.get('effort_level', '')}"
+        )
+
+    _fill_slide(
+        slides[4],
+        title_text="Initiative Opportunities",
+        bullets=initiative_bullets,
+    )
+
+    kpi_bullets = []
+    for item in safe_list(executive_json.get("kpi_recommendations")):
+        kpi_bullets.append(
+            f"Leading KPI: {item.get('leading_kpi', '')} | "
+            f"Lagging KPI: {item.get('lagging_kpi', '')} | "
+            f"Baseline: {item.get('suggested_baseline', '')} | "
+            f"Target: {item.get('suggested_target', '')}"
+        )
+
+    _fill_slide(
+        slides[5],
+        title_text="KPI Recommendations",
+        bullets=kpi_bullets,
+    )
+
+    final_bullets = [
+        "0-30 days: " + " | ".join(safe_list(plan.get("days_0_30"))),
+        "31-60 days: " + " | ".join(safe_list(plan.get("days_31_60"))),
+        "61-90 days: " + " | ".join(safe_list(plan.get("days_61_90"))),
+    ] + safe_list(slide_ready.get("bullets")) + [
+        f"Suggested chart: {slide_ready.get('suggested_chart', '')}",
+        f"Expected business impact: {slide_ready.get('expected_business_impact', '')}",
+        f"Expected productivity gain: {slide_ready.get('expected_productivity_gain', '')}",
     ]
 
-    fill_slide(
-        1,
-        "Initiative Opportunities",
-        initiatives,
-    )
-
-    # KPI
-    kpis = [
-        f"{k['leading_kpi']} → Target: {k['suggested_target']}"
-        for k in executive_json["kpi_recommendations"]
-    ]
-
-    fill_slide(
-        1,
-        "KPI Recommendations",
-        kpis,
-    )
-
-    # Execution
-    plan = executive_json["execution_plan_30_60_90"]
-
-    plan_bullets = (
-        ["0-30 days: " + ", ".join(plan["days_0_30"])]
-        + ["31-60 days: " + ", ".join(plan["days_31_60"])]
-        + ["61-90 days: " + ", ".join(plan["days_61_90"])]
-    )
-
-    fill_slide(
-        1,
-        "Execution Plan",
-        plan_bullets,
+    _fill_slide(
+        slides[6],
+        title_text="Execution Plan & Summary",
+        bullets=final_bullets,
     )
 
     output = io.BytesIO()
     prs.save(output)
+    output.seek(0)
     return output.getvalue()
 
 
@@ -805,7 +887,7 @@ with st.sidebar:
     auto_call_n8n = st.toggle("Auto-call n8n backend", value=True)
     n8n_webhook_url = st.text_input(
         "n8n webhook URL",
-        value=st.secrets.get("N8N_WEBHOOK_URL", "") if hasattr(st, "secrets") else "",
+        value=st.secrets.get("N8N_WEBHOOK_URL", ""),
     )
     st.caption("For deployment, store the webhook in Streamlit secrets as N8N_WEBHOOK_URL.")
     st.caption("Optional: add template_exec_deck.pptx to the repo root for branded slides.")
@@ -856,9 +938,15 @@ with tab1:
                 if not cleaned_datasets:
                     st.error("No supported files were loaded.")
                 else:
-                    dataset_profiles = {name: profile_dataframe(df) for name, df in cleaned_datasets.items()}
-                    dataset_category_insights = {name: get_top_categories(df) for name, df in cleaned_datasets.items()}
-                    dataset_numeric_summaries = {name: get_numeric_summary(df) for name, df in cleaned_datasets.items()}
+                    dataset_profiles = {
+                        name: profile_dataframe(df) for name, df in cleaned_datasets.items()
+                    }
+                    dataset_category_insights = {
+                        name: get_top_categories(df) for name, df in cleaned_datasets.items()
+                    }
+                    dataset_numeric_summaries = {
+                        name: get_numeric_summary(df) for name, df in cleaned_datasets.items()
+                    }
                     join_key_report = detect_possible_join_keys(cleaned_datasets)
                     machine_findings = build_machine_findings(cleaned_datasets)
 
@@ -894,7 +982,7 @@ with tab1:
                         if parsed_json is not None:
                             st.session_state.executive_json = parsed_json
                             st.session_state.analysis_output = raw_text
-                            st.session_state.ppt_bytes = create_pptx(executive_json)
+                            st.session_state.ppt_bytes = create_pptx(parsed_json)
                         else:
                             st.session_state.analysis_output = raw_text
 
@@ -905,6 +993,7 @@ with tab1:
         for name, df in st.session_state.cleaned_datasets.items():
             with st.expander(f"{name} — {df.shape[0]} rows × {df.shape[1]} columns", expanded=False):
                 st.dataframe(df.head(20), use_container_width=True)
+
                 obj_cols = df.select_dtypes(include=["object"]).columns.tolist()
                 if obj_cols:
                     top_col = obj_cols[0]
@@ -968,3 +1057,36 @@ with tab3:
 
         st.subheader("Raw Executive JSON")
         st.json(st.session_state.executive_json)
+
+with tab4:
+    presenter_text = """
+### Presenter flow
+1. Open the Streamlit link.
+2. Upload the datasets.
+3. Click **Run Analysis**.
+4. Open **Executive Insights**.
+5. Open **Slides** and click **Download PowerPoint**.
+
+### Demo backend mode
+- The app calls an **n8n webhook**.
+- n8n returns a **predefined JSON response**.
+- This makes the demo stable and avoids live model/API quota issues.
+
+### Template file
+- File name: `template_exec_deck.pptx`
+- Place it in the same folder as `app.py`.
+- The app uses the first 7 slides of the template.
+- For best results, use real placeholders in the template:
+  - Slide 1: title placeholder + subtitle/body placeholder
+  - Slides 2–7: title placeholder + body/content placeholder
+
+### Recommended requirements.txt
+```txt
+streamlit
+pandas
+duckdb
+openpyxl
+numpy
+python-dateutil
+python-pptx
+requests
